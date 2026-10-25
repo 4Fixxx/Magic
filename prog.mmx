@@ -1,0 +1,9 @@
+#start
+print "hello!"
+setname a, <NUMBER>
+#end
+
+@function
+    on input <d>
+        add $NUMBER$, 1
+        print "$NUMBER$"
