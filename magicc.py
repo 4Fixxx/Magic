@@ -14,8 +14,23 @@ SCREEN   VGA colour text 80x25 at 0xB8000, hardware cursor via 0x3D4/0x3D5.
 KEYS     PS/2 polled (status 0x64, data 0x60), scancode set 1 (BIOS translated).
          <a>-<z> <0>-<9> <space> <enter> <esc> <tab> <backspace> <up> <down>
          <left> <right> <f1>-<f12> and - = [ ] ; ' ` \\ , . /
-         input is polled at: jump, return, loop end, halt, and while waiting at #end.
-         keys pressed while a function runs are queued (16 deep).
+         input is polled continuously (after every statement) + at jump/return/loop end/halt/#end.
+         keys pressed while a function runs are queued (16 deep, the 17th is dropped).
+PORTS    16 bit ISA style port I/O (ports 0-65535, data 0-65535, 'in ax,dx' / 'out dx,ax').
+         output <port>, <data>     writes <data> to <port>. register operands use their low 16 bits.
+         on port input <port>, <reg>   port function: polled the same way as keys, fires only when
+                                       the port inputs something: a NEW NON-ZERO value (idle is 0, going
+                                       back to 0 never fires). Stores the value in <reg> (even with no
+                                       code under it), then runs its code.
+         on port input <port>, "N"     fires its code only when the new value is N (N is 1..65535, 0 is
+                                       "no input" so it is a compile error), stores nothing.
+         <port> is a plain number or a register (its low 16 bits, read every poll).
+         port events are queued (16 deep) while a function runs, same as keys.
+SIMULTANEOUS  events found in the same poll count as "exactly at the same time". When 2 or more
+         functions are triggered together the order is random: key vs port (random pick between the
+         two queue heads when they were found in the same poll, older events always go first),
+         port vs port (the events of one poll are shuffled), and several functions on the same key
+         (random one goes first).
 RULES    - custom names ($NAME$) are global and resolved at compile time.
          - jump pushes a return point on a 64-deep ring (oldest dropped when full),
            return with an empty ring does nothing.
@@ -24,7 +39,7 @@ RULES    - custom names ($NAME$) are global and resolved at compile time.
            'jump' abandons it (stack unwound) and continues at the section, no return point.
          - loop: body runs, at ']' c moves 1 toward 0, repeats while c != 0.
          - the else line may be at the same or deeper indent than its if.
-         - tab counts as 4 spaces. numbers: decimal or 0x hex.
+         - tab counts as 4 spaces. numbers: decimal only (hex like 0x8 is an error).
 """
 import sys
 import os
@@ -36,10 +51,12 @@ EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI = range(8)
 CC_B, CC_AE, CC_E, CC_NE, CC_S, CC_NS, CC_G = 2, 3, 4, 5, 8, 9, 0xF
 
 REG4 = {'a': 0, 'b': 4, 'c': 8, 'd': 12}
+HEX_RE = re.compile(r'[+-]?0[xX][0-9a-fA-F]+')
+NUM_RE = re.compile(r'[+-]?[0-9]+')
 MEM0 = 16
 BUILTIN = {'add', 'sub', 'mul', 'div', 'move', 'setname', 'copy', 'jump', 'print', 'if', 'exit',
            'stackadd', 'stack2add', 'stacktake', 'stack2take', 'return', 'random', 'nop',
-           'compare', 'skip', 'halt', 'resume', 'else'}
+           'compare', 'skip', 'halt', 'resume', 'output', 'else'}
 
 KEYS = {'esc': 0x01, '-': 0x0C, '=': 0x0D, 'backspace': 0x0E, 'tab': 0x0F, '[': 0x1A, ']': 0x1B,
         'enter': 0x1C, ';': 0x27, "'": 0x28, '`': 0x29, '\\': 0x2B, ',': 0x33, '.': 0x34,
@@ -94,6 +111,10 @@ class Asm:
             s.fx('bss', m[1])
         elif k == 'lbl':
             s.raw(0x80 | (r << 3) | 5)
+            s.fx('lbl', m[1])
+        elif k == 'lblx':
+            sc = {1: 0, 2: 1, 4: 2, 8: 3}[m[3]]
+            s.raw(0x80 | (r << 3) | 4, (sc << 6) | (m[2] << 3) | 5)
             s.fx('lbl', m[1])
         elif k == 'r':
             s.raw((r << 3) | m[1])
@@ -151,6 +172,7 @@ class Asm:
     def div(s, r): s.raw(0xF7, 0xF0 | r)
     def idiv(s, r): s.raw(0xF7, 0xF8 | r)
     def movzx8(s, d, x): s.raw(0x0F, 0xB6, 0xC0 | (d << 3) | x)
+    def movzx16(s, d, x): s.raw(0x0F, 0xB7, 0xC0 | (d << 3) | x)
     def push(s, r): s.raw(0x50 + r)
     def pop(s, r): s.raw(0x58 + r)
     def push_m(s, m): s.raw(0xFF); s.modrm(6, m)
@@ -198,6 +220,7 @@ class Compiler:
         self.custom = set()
         self.cmds = []
         self.funcs = []
+        self.pfuncs = []
         self.secs = ['start']
         self.refs = []
         self.skipped = set()
@@ -280,18 +303,21 @@ class Compiler:
                 return ('reg', self.names[m.group(1)])
             self.err(no, "unknown custom name '%s' (never set with setname)" % tok)
             return None
+        if HEX_RE.fullmatch(tok):
+            self.err(no, "hex numbers are not allowed ('%s'), use a decimal number" % tok)
+            return None
         self.err(no, "invalid operand '%s'" % tok)
         return None
 
     def need_reg(self, tok, no, what='first operand'):
-        if re.fullmatch(r'[+-]?(0[xX][0-9a-fA-F]+|[0-9]+)', tok):
+        if NUM_RE.fullmatch(tok):
             self.err(no, "%s must be a register, got number '%s'" % (what, tok))
             return None
         return self.regref(tok, no)
 
     def operand(self, tok, no):
-        if re.fullmatch(r'[+-]?(0[xX][0-9a-fA-F]+|[0-9]+)', tok):
-            v = int(tok, 16) if 'x' in tok.lower() else int(tok, 10)
+        if NUM_RE.fullmatch(tok):
+            v = int(tok, 10)
             if v > MAXV or v < -MAXV:
                 self.err(no, "number %s out of range (%d..%d)" % (tok, -MAXV, MAXV))
                 return None
@@ -562,12 +588,16 @@ class Compiler:
             t = h.text
             if t == '@function':
                 if not body:
-                    self.err(h.no, "'@function' needs 'on input <key>' under it")
+                    self.err(h.no, "'@function' needs 'on input <key>' or 'on port input <port>, <register>' under it")
                     continue
                 oi = body[0]
+                mp = re.fullmatch(r'on\s+port\s+input\s+(.*)', oi.text)
+                if mp:
+                    self.parse_port_func(oi, mp.group(1), body[1:])
+                    continue
                 m = re.fullmatch(r'on\s+input\s+<([^<>]+)>', oi.text)
                 if not m:
-                    self.err(oi.no, "expected: on input <key>")
+                    self.err(oi.no, "expected: on input <key>  or  on port input <port>, <register>")
                     continue
                 key = m.group(1).strip().lower()
                 if key not in KEYS:
@@ -582,6 +612,48 @@ class Compiler:
                 self.err(h.no, "no sections or '#' lines allowed after '#end'")
             else:
                 self.err(h.no, "after '#end' only '@function' and '!<name>' definitions are allowed")
+
+    def port_num(self, tok, no, what):
+        o = self.operand(tok, no)
+        if o is not None and o[0] == 'num' and not 0 <= o[1] <= 65535:
+            self.err(no, "%s %s out of range (0..65535)" % (what, tok))
+            return None
+        return o
+
+    def parse_port_func(self, oi, rest, body):
+        no = oi.no
+        m = re.fullmatch(r'(\S+?)\s*,\s*(\S+)', rest.strip())
+        if not m:
+            self.err(no, 'syntax: on port input <port>, <register>   or   on port input <port>, "number"')
+            return
+        port = self.port_num(m.group(1), no, 'port number')
+        t2 = m.group(2)
+        reg = val = None
+        q = re.fullmatch(r'"([^"]*)"', t2)
+        if q:
+            inner = q.group(1).strip()
+            if HEX_RE.fullmatch(inner):
+                self.err(no, "hex numbers are not allowed (\"%s\"), use a decimal number" % q.group(1))
+                return
+            if not re.fullmatch(r'[0-9]+', inner):
+                self.err(no, "the value in quotes must be a number from 1 to 65535, got '%s'" % q.group(1))
+                return
+            val = int(inner, 10)
+            if val > 65535:
+                self.err(no, "port value %d out of range (1..65535)" % val)
+                return
+            if val == 0:
+                self.err(no, "port value 0 means 'no input' and never fires a function, use 1..65535")
+                return
+        else:
+            r = self.need_reg(t2, no, 'second operand')
+            if r is None:
+                return
+            reg = r[1]
+        if port is None:
+            return
+        self.pfuncs.append(N('pfunc', no, port=port, reg=reg, val=val,
+                             body=self.parse_body(body, oi.indent)))
 
     # ---- commands
     def parse_print(self, text, no):
@@ -738,6 +810,21 @@ class Compiler:
             if r is None:
                 return None
             return N('random', no, reg=r[1])
+        if cmd == 'output':
+            a = self.args(rest, no, cmd)
+            if a is None:
+                return None
+            if len(a) != 2:
+                self.err(no, "'output' takes exactly 2 operands (port, data)")
+                return None
+            p = self.port_num(a[0], no, 'port number')
+            d = self.operand(a[1], no)
+            if d is not None and d[0] == 'num' and not 0 <= d[1] <= 65535:
+                self.err(no, "output data %s out of range (0..65535)" % a[1])
+                return None
+            if p is None or d is None:
+                return None
+            return N('output', no, port=p, data=d)
         if cmd == 'compare':
             a = self.args(rest, no, cmd)
             if a is None:
@@ -776,6 +863,16 @@ class Gen:
             b.alloc(nm, 4)
         b.alloc('kq', 64)
         b.alloc('rstk', 256)
+        if c.pfuncs:
+            b.alloc('pq', 64)
+            b.alloc('pqh', 4)
+            b.alloc('pqt', 4)
+            b.alloc('plast', 4 * len(c.pfuncs))
+            b.alloc('pport', 4 * len(c.pfuncs))
+            b.alloc('pseq', 4)               # poll counter: events found in one poll are simultaneous
+            b.alloc('pbs', 4)                # tail of the port queue when the current scan began
+            b.alloc('kqs', 64)               # poll number each queued key was found in
+            b.alloc('pqs', 64)               # same for queued port events
         b.alloc('skip', 4 * len(c.secs))
         b.alloc('stack', 8192)
         self.stack_top = b.o['stack'] + 8192
@@ -827,16 +924,58 @@ class Gen:
             a.label('F_%d' % i)
             self.gen(body, 'sub')
             a.raw(0xC3)
+        # one ftab entry per key. several functions on the same key trigger at the same
+        # moment, so they go through a small stub that runs them in a random order
+        groups = {}
+        for i, (key, body) in enumerate(self.c.funcs):
+            groups.setdefault(key, []).append(i)
+        self.ftab = []
+        for key, g in groups.items():
+            if len(g) == 1:
+                self.ftab.append((key, 'F_%d' % g[0]))
+            else:
+                lab = 'FG_%d' % key
+                self.gen_group(lab, g)
+                self.ftab.append((key, lab))
+        for i, pf in enumerate(self.c.pfuncs):
+            a.label('PF_%d' % i)             # eax = value read from the port
+            if pf.reg is not None:
+                a.mov_mr(('bss', pf.reg), EAX)
+            self.gen(pf.body, 'sub')
+            a.raw(0xC3)
         self.runtime()
         while len(a.b) % 4:
             a.raw(0)
         a.label('ftab')
-        for i, (key, body) in enumerate(self.c.funcs):
+        for key, lab in self.ftab:
             a.dd(key)
-            a.fx('lbl', 'F_%d' % i)
+            a.fx('lbl', lab)
+        a.label('ptab')
+        for i in range(len(self.c.pfuncs)):
+            a.fx('lbl', 'PF_%d' % i)
         for data, lab in self.strs.items():
             a.label(lab)
             a.b.extend(data)
+
+    def gen_group(self, lab, g):
+        # g = indexes of the functions that share one key. random one first, the others follow
+        a = self.a
+        m = len(g)
+        a.label(lab)
+        a.call('random')
+        a.xor_rr(EDX, EDX)
+        a.mov_ri(ECX, m)
+        a.div(ECX)                           # edx = random 0..m-1
+        for r in range(m):
+            nx = a.new()
+            if r < m - 1:
+                a.cmp_ri(EDX, r)
+                a.jcc(CC_NE, nx)
+            for t in range(m):
+                a.call('F_%d' % g[(r + t) % m])
+            a.raw(0xC3)
+            if r < m - 1:
+                a.label(nx)
 
     def prologue(self):
         a = self.a
@@ -872,6 +1011,10 @@ class Gen:
     def gen(self, nodes, ctx):
         for n in nodes:
             getattr(self, 'g_' + n.k)(n, ctx)
+            # continuous polling: check keys + ports after every statement
+            # (queues while a handler is running, dispatches when free)
+            if n.k not in ('section', 'setname'):
+                self.a.call('poll')
 
     # ---- statements
     def g_section(self, n, ctx):
@@ -1126,6 +1269,12 @@ class Gen:
         a.label(st)
         a.mov_mr(('bss', 12), EDX)
 
+    def g_output(self, n, ctx):
+        a = self.a
+        self.load(EAX, n.data)
+        self.load(EDX, n.port)
+        a.raw(0x66, 0xEF)                    # out dx,ax
+
     def g_random(self, n, ctx):
         self.a.call('random')
         self.a.mov_mr(('bss', n.reg), EAX)
@@ -1134,6 +1283,8 @@ class Gen:
     def runtime(self):
         self.rt_poll()
         self.rt_dispatch()
+        if self.c.pfuncs:
+            self.rt_ports()
         self.rt_screen()
         self.rt_misc()
 
@@ -1141,8 +1292,13 @@ class Gen:
         a = self.a
         V = self.V
         nxt, disp, notE0, rel, done, dloop = [a.new() for _ in range(6)]
+        ports = bool(self.c.pfuncs)
         a.label('poll')
         a.raw(0x60)                          # pushad
+        if ports:
+            a.mov_rm(EAX, V('pseq'))         # every poll is one tick of time
+            a.inc(EAX)
+            a.mov_mr(V('pseq'), EAX)
         a.label(nxt)
         a.raw(0xE4, 0x64)                    # in al,0x64
         a.raw(0x3C, 0xFF)                    # cmp al,0xFF (no controller)
@@ -1165,33 +1321,95 @@ class Gen:
         a.jcc(CC_NE, rel)
         a.or_rm(EAX, V('kext'))
         a.mov_mi(V('kext'), 0)
+        # queue the key. head/tail count 0..31, slot = index & 15, full when 16 are queued
         a.mov_rm(ECX, V('kqt'))
         a.mov_rr(EDX, ECX)
+        a.sub_rm(EDX, V('kqh'))
+        a.and_ri(EDX, 31)
+        a.cmp_ri(EDX, 16)
+        a.jcc(CC_AE, nxt)                    # 16 already waiting: drop this key
+        a.mov_rr(EDX, ECX)
         a.inc(EDX)
-        a.and_ri(EDX, 15)
-        a.cmp_rm(EDX, V('kqh'))
-        a.jcc(CC_E, nxt)
+        a.and_ri(EDX, 31)
+        a.and_ri(ECX, 15)
         a.mov_mr(self.X('kq', 0, ECX), EAX)
+        if ports:
+            a.mov_rm(EBX, V('pseq'))
+            a.mov_mr(self.X('kqs', 0, ECX), EBX)
         a.mov_mr(V('kqt'), EDX)
         a.jmp(nxt)
         a.label(rel)
         a.mov_mi(V('kext'), 0)
         a.jmp(nxt)
         a.label(disp)
+        if ports:
+            a.call('pscan')
         a.cmp_mi(V('inh'), 0)
         a.jcc(CC_NE, done)
         a.label(dloop)
-        a.mov_rm(ECX, V('kqh'))
-        a.cmp_rm(ECX, V('kqt'))
-        a.jcc(CC_E, done)
-        a.mov_rm(EAX, self.X('kq', 0, ECX))
-        a.inc(ECX)
-        a.and_ri(ECX, 15)
-        a.mov_mr(V('kqh'), ECX)
-        a.mov_mi(V('inh'), 1)
-        a.call('dispatch')
-        a.mov_mi(V('inh'), 0)
-        a.jmp(dloop)
+        if not ports:
+            a.mov_rm(ESI, V('kqh'))
+            a.cmp_rm(ESI, V('kqt'))
+            a.jcc(CC_E, done)
+            a.mov_rr(ECX, ESI)
+            a.and_ri(ECX, 15)
+            a.mov_rm(EAX, self.X('kq', 0, ECX))
+            a.inc(ESI)
+            a.and_ri(ESI, 31)
+            a.mov_mr(V('kqh'), ESI)
+            a.mov_mi(V('inh'), 1)
+            a.call('dispatch')
+            a.mov_mi(V('inh'), 0)
+            a.jmp(dloop)
+        else:
+            nokey, dokey, doport, tie = [a.new() for _ in range(4)]
+            a.mov_rm(ESI, V('kqh'))          # esi = key queue head
+            a.cmp_rm(ESI, V('kqt'))
+            a.jcc(CC_E, nokey)
+            a.mov_rm(EDI, V('pqh'))          # edi = port queue head
+            a.cmp_rm(EDI, V('pqt'))
+            a.jcc(CC_E, dokey)
+            # both queues have something: the older poll goes first, same poll = random
+            a.mov_rr(EBX, ESI)
+            a.and_ri(EBX, 15)
+            a.mov_rm(EAX, self.X('kqs', 0, EBX))
+            a.mov_rr(ECX, EDI)
+            a.and_ri(ECX, 15)
+            a.sub_rm(EAX, self.X('pqs', 0, ECX))
+            a.jcc(CC_E, tie)
+            a.jcc(CC_S, dokey)               # key stamp is older
+            a.jmp(doport)
+            a.label(tie)
+            a.call('random')
+            a.test_ri(EAX, 0x10000)
+            a.jcc(CC_E, dokey)
+            a.jmp(doport)
+            a.label(nokey)
+            a.mov_rm(EDI, V('pqh'))
+            a.cmp_rm(EDI, V('pqt'))
+            a.jcc(CC_E, done)
+            a.label(doport)
+            a.mov_rr(ECX, EDI)
+            a.and_ri(ECX, 15)
+            a.mov_rm(EAX, self.X('pq', 0, ECX))
+            a.inc(EDI)
+            a.and_ri(EDI, 31)
+            a.mov_mr(V('pqh'), EDI)
+            a.mov_mi(V('inh'), 1)
+            a.call('pdispatch')
+            a.mov_mi(V('inh'), 0)
+            a.jmp(dloop)
+            a.label(dokey)
+            a.mov_rr(ECX, ESI)
+            a.and_ri(ECX, 15)
+            a.mov_rm(EAX, self.X('kq', 0, ECX))
+            a.inc(ESI)
+            a.and_ri(ESI, 31)
+            a.mov_mr(V('kqh'), ESI)
+            a.mov_mi(V('inh'), 1)
+            a.call('dispatch')
+            a.mov_mi(V('inh'), 0)
+            a.jmp(dloop)
         a.label(done)
         a.raw(0x61, 0xC3)                    # popad, ret
 
@@ -1202,12 +1420,101 @@ class Gen:
         a.pop_m(V('inh'))
         a.raw(0xC3)
 
+    def rt_ports(self):
+        a = self.a
+        V = self.V
+        n = len(self.c.pfuncs)
+        # pscan: read every port function's port, queue (index<<16 | value) when the port
+        # gets a NEW NON-ZERO value. going back to 0 only updates the remembered value.
+        # called from poll (after pushad), clobbers everything.
+        a.label('pscan')
+        a.mov_rm(EAX, V('pqt'))
+        a.mov_mr(V('pbs'), EAX)                         # remember where this scan's events start
+        for i, pf in enumerate(self.c.pfuncs):
+            nx, up = a.new(), a.new()
+            if pf.port[0] == 'num':
+                a.mov_ri(EDX, pf.port[1])
+            else:
+                same = a.new()
+                a.mov_rm(EDX, ('bss', pf.port[1]))
+                a.and_ri(EDX, 0xFFFF)
+                a.cmp_rm(EDX, V('pport', 4 * i))
+                a.jcc(CC_E, same)
+                a.mov_mr(V('pport', 4 * i), EDX)        # port changed: new port starts idle (0)
+                a.mov_mi(V('plast', 4 * i), 0)
+                a.label(same)
+            a.raw(0x66, 0xED)                           # in ax,dx
+            a.movzx16(EAX, EAX)
+            a.cmp_rm(EAX, V('plast', 4 * i))
+            a.jcc(CC_E, nx)
+            a.test_rr(EAX, EAX)
+            a.jcc(CC_E, up)                             # back to 0 = no input: remember it, nothing fires
+            if pf.val is not None:
+                a.cmp_ri(EAX, pf.val)
+                a.jcc(CC_NE, up)                        # not the awaited value: just remember it
+            a.mov_rm(ECX, V('pqt'))
+            a.mov_rr(EDX, ECX)
+            a.sub_rm(EDX, V('pqh'))
+            a.and_ri(EDX, 31)
+            a.cmp_ri(EDX, 16)
+            a.jcc(CC_AE, nx)                            # 16 waiting: keep old value, retry next poll
+            a.mov_rr(EBX, EAX)
+            a.add_ri(EBX, i << 16)
+            a.mov_rr(EDX, ECX)
+            a.inc(EDX)
+            a.and_ri(EDX, 31)
+            a.and_ri(ECX, 15)
+            a.mov_mr(self.X('pq', 0, ECX), EBX)
+            a.mov_rm(EBX, V('pseq'))
+            a.mov_mr(self.X('pqs', 0, ECX), EBX)
+            a.mov_mr(V('pqt'), EDX)
+            a.label(up)
+            a.mov_mr(V('plast', 4 * i), EAX)
+            a.label(nx)
+        if n >= 2:
+            # events found in this scan are simultaneous: shuffle them (Fisher-Yates)
+            sh, shd = a.new(), a.new()
+            a.mov_rm(ESI, V('pqt'))
+            a.sub_rm(ESI, V('pbs'))
+            a.and_ri(ESI, 31)                           # esi = k new events
+            a.cmp_ri(ESI, 2)
+            a.jcc(CC_B, shd)
+            a.label(sh)
+            a.dec(ESI)                                  # j = k-1 .. 1
+            a.jcc(CC_E, shd)
+            a.call('random')
+            a.xor_rr(EDX, EDX)
+            a.mov_rr(ECX, ESI)
+            a.inc(ECX)
+            a.div(ECX)                                  # edx = random 0..j
+            a.mov_rm(EBX, V('pbs'))
+            a.mov_rr(ECX, EBX)
+            a.add_rr(ECX, ESI)
+            a.and_ri(ECX, 15)                           # slot of entry j
+            a.add_rr(EBX, EDX)
+            a.and_ri(EBX, 15)                           # slot of entry r
+            a.mov_rm(EAX, self.X('pq', 0, ECX))
+            a.mov_rm(EDX, self.X('pq', 0, EBX))
+            a.mov_mr(self.X('pq', 0, ECX), EDX)
+            a.mov_mr(self.X('pq', 0, EBX), EAX)
+            a.jmp(sh)
+            a.label(shd)
+        a.raw(0xC3)
+        # pdispatch: eax = index<<16 | value -> run that port function with eax = value
+        a.label('pdispatch')
+        a.mov_rr(ECX, EAX)
+        a.shr(ECX, 16)
+        a.movzx16(EAX, EAX)
+        a.mov_rm(EDX, ('lblx', 'ptab', ECX, 4))
+        a.add_rr(EDX, EBP)
+        a.jmp_r(EDX)
+
     def rt_dispatch(self):
         a = self.a
         dl, de, ds = a.new(), a.new(), a.new()
         a.label('dispatch')                  # eax = key code
         a.lea(ESI, ('lbl', 'ftab'))
-        a.mov_ri(ECX, len(self.c.funcs))
+        a.mov_ri(ECX, len(self.ftab))
         a.label(dl)
         a.test_rr(ECX, ECX)
         a.jcc(CC_E, de)
