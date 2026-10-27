@@ -3,8 +3,8 @@ assembly like programming language for `32 bit` systems like `pentium mmx`
 
 Language simpler than writing prompt to ai!
 
-Documentation in [magic.md]!
-Documentation for vibe coders in [vibecodemmx.txt]!
+Documentation in [magic.md](magic.md)!
+Documentation for vibe coders in [vibecodemmx.txt](vibecodemmx.txt)!
 
 Compile with `python magicc.py yourprogram.mmx`
 
