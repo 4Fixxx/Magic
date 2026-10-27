@@ -1,36 +1,39 @@
-Magic documentation
-32 Bit programming language inspired by assembly and gforth.
+# Magic documentation
 
+32-bit programming language inspired by `assembly` and `gforth`.
 
+## Basics
 
-1. Basics
+You write code in `.mmx` files and compile it to `.cmc` (which contains machine code).
 
-You write code in ".mmx" files and compile to ".cmc" (it contains machine code).
+Everything (skipping `$$` custom names) in quotes in `print ""` is printed as text, so if you make a comment inside quotes it wont work.
 
-Everything (skipping $$ cutom names) in quotes in 'print ""' is printed as text so if you make comment inside quotes it wont work.
+Dividing by zero gives `0`.
 
-Dividing by zero gives 0.
+You do math on the first operand in command, so it MUST be a register. In `add m1, 13, m2, 143` all operands after `m1` are going to be added to `m1`. Only first operand we do math on gets changed, all other stay unchanged which means in `add m1, m2`, the number in `m2` is added to `m1` and only `m1` gets changed and `m2` stays unchanged.
 
-You do math on the first operand in command, it MUST be a register. In 'add m1, 13, m2, 143' all operands after "m1" are going to be added to 'm1'. Only first operand we do math gets changed, all other stay unchanged which means in 'add m1, m2' number from 'm2' is added to 'm1' and only 'm1' gets changed and 'm2' stays unchanged.
-
-Program must start with '#start' and end with '#end', program only runs from start to end. After '#end' you can define your custom commands with '!'. You can split main code into sections you can "jump" to. After program finishes running it waits on '#end' if you dont put 'exit' before it.
+Program must start with `#start` and end with `#end`. A program only runs from start to end. After `#end` you can define your custom commands with `!`. You can split main code into sections you can "jump" to. After a program finishes running, it waits on `#end` if you dont put `exit` before it.
 
 Functions are input-triggered code.
 
-If you want to set a custom name for register it must be capital letters only. To use it you have to put the custom name in '$ $', you cant use special characters and numbers. Register can have only 1 custom name.
+If you want to set a custom name for register it must be capital letters only. To use it you have to put the custom name in `$ $`, you can't use special characters and numbers. Register can have only one custom name.
 
-If you want more than 1 command in a line you have to add '; ' between them.
+If you want more than one command in a line you have to add `; ` between them.
 
-You have 6 registers (not counting the memory ones). All registers start at 0. Biggest negative number is -2147483647 and biggest positive number registers can hold is 2147483647. If you make number in register bigger than max number it becomes opposite number.
-'a' and 'b' are for general math use.
-'c' is for loop count, loop stops when 'c' is 0, it subtracts 1 from the number or adds 1 if number is negative until it hits 0.
-'d' holds remainder from division. If we divide 7 by 2 we get 3 and 1 as remainder goes to 'd'. Also used for compare.
-'e' and 'f' are stack, you can add number to top of a stack using 'stackadd -' and take number from top using 'stacktake -', in place of '-' you have to set register from which you take that number. YOU CANT DO ANY MATH ON THEM. 'e' and 'f' cant be operands. Each stack holds up to 4 numbers. If a stack is full, stackadd does nothing and the register keeps its number. If a stack is empty, stacktake puts 0 in the register.
+You have 6 registers (not counting the memory ones). All registers start at `0`. Biggest negative number is `-2147483647` (`-2³¹`) and biggest positive number registers can hold is `2147483647` (`2³¹ - 1`). If you make number in register bigger than max number it becomes opposite number.
 
-You have 4096 memory registers, they work the same as 'a' and 'b' registers (hold a number on which you can do math), you use them in the same way as 'a' and 'b'.
-Registers are from m1 to m4096.
+`a` and `b` are for general math use.
 
-Example:
+`c` is for loop count, loop stops when `c` is `0`, it subtracts `1` from the number or adds `1` if number is negative, until it hits `0`.
+
+`d` holds remainder from division. If we divide `7` by `2` we get `3`, and `1` as remainder goes to `d`. Also used for comparing.
+
+`e` and `f` are stack, you can add number to top of a stack using `stackadd -` and take number from top using `stacktake -`, in place of `-` you have to set register from which you take that number. YOU can't DO ANY MATH ON THEM. `e` and `f` can't be operands. Each stack holds up to 4 numbers. If a stack is full, stackadd does nothing and the register keeps its number. If a stack is empty, stacktake puts 0 in the register.
+
+You have `4096` memory registers, they work the same as `a` and `b` registers (hold a number on which you can do math), you use them in the same way as `a` and `b`.
+Registers are from `m1` to `m4096`.
+
+## Example
 
 ```
 #start
@@ -47,45 +50,65 @@ exit
 #end
 ```
 
-2. Commands
+# Commands
 
-`add -, -` adds all operands after ", " to first operand in command.
+## `add`
+
+`add -, -` adds all operands after `, ` to first operand in command.
+
 `add m1, 10` 10 is added to memory register
-`add $EXAMPLE$, m1` number from m1 is added to number in register which has "$EXAMPLE$" set as custom name.
+
+`add $EXAMPLE$, m1` number from m1 is added to number in register which has `$EXAMPLE$` set as custom name.
+
 `add a, m1, m2, m3, m4` adds all operand after first operand to first operand.
 
+## `sub`
 
-`sub -, -` subtracts all operands after ", " from first operand in command. Works like 'add'. Only first operand is changed.
+`sub -, -` subtracts all operands after `, ` from first operand in command. Works like `add`. Only first operand is changed.
 
+## `div`
 
-`div -, -` divides first operand by second operand, max number of operands is 2. Remainder from division goes to register 'd'. Second operand stays unchanged, only first is changed.
-`div m1, 2` number in 'm1' is divided by number 2.
+`div -, -` divides first operand by second operand, max number of operands is 2. Remainder from division goes to register `d`. Second operand stays unchanged, only first is changed.
 
+`div m1, 2` number in `m1` is divided by number `2`.
+
+## `mul`
 
 `mul -, -` multiplies first operand by all operands after first one. Only first operand is changed.
-`mul m1, m3, 2, 4` multiplies number in 'm1' by number in 'm3' and 2 and 4.
 
+`mul m1, m3, 2, 4` multiplies number in `m1` by number in `m3` and `2` and `4`.
 
-`move -, -` moves number from first register to second register, both operands must be registers. Number in first register becomes 0 and number in second register becomes the number from first register. Max number of operands is 2.
+## `move`
 
-`move m1, $NUMBER$` moves number from 'm1' to '$NUMBER$' and sets m1 to 0.
+`move -, -` moves number from first register to second register, both operands must be registers. Number in first register becomes `0` and number in second register becomes the number from first register. Max number of operands is `2`.
 
+`move m1, $NUMBER$` moves number from `m1` to `$NUMBER$` and sets `m1` to `0`.
 
-`setname -, < >` gives register custom name you can use as '$NAME$', first operand must be register. In '< >' set name you want that follows rule from "1. Basics" section.
-`setname a, <NUMBER>` gives register 'a' name "$NUMBER$"
+## `setname`
 
+`setname -, < >` gives register custom name you can use as `$NAME$`, first operand must be register. In `< >` set name you want that follows rule from [basics](#basics) section.
+
+`setname a, <NUMBER>` gives register `a` name `$NUMBER$`
+
+## `copy`
 
 `copy -, -` copies number from first operand to all operands after first one. All operands after first one must be a register.
+
 `copy $NUMBER$, m1, m4, m2, $EXAMPLE$`
 
+## `jump`
 
 `jump #-` jumps to set section and code continues to execute from that point.
+
 `jump #example` jumps to section named example.
 
+## `print`
 
 `print " "` prints text in quotes, it also can print $NAME$ as number from register you set this custom name for.
+
 `print "you have $NUMBER$ apples!"`
 
+## `if - is - else`
 
 `if - is - else` checks if number in register set as first operand is second operand, first operand must be a register or custom name. If yes it executes code under it, if no else executes its code. If and else ends when next commands has no space before it.
 ```
@@ -95,41 +118,53 @@ if $NUMBER$ is 20
             add $NUMBER$, 1
 ```
 
-`exit` makes the program end, closes it, it is not needed, not adding it makes program continue to run (after running to #end it just waits on #end)
+## `exit`
 
+`exit` makes the program end, closes it, it is not needed, not adding it makes program continue to run (after running to `#end` it just waits on `#end`)
 
-`stackadd -`, `stack2add -` adds number from first operand on top of a stack and if operand is a register makes that register 0. You have 2 stacks. Stack 1 is 'e' and stack 'f' is 2.
-`stacktake -`, `stack2take -` takes number from top of a stack and puts it in register, operand must be a register. Stack 1 is 'e' and stack 'f' is 2.
+## `stackadd` and `stack2add`
 
+`stackadd -`, `stack2add -` adds number from first operand on top of a stack and if operand is a register makes that register `0`. You have `2` stacks. Stack `1` is `e` and stack `f` is `2`.
+`stacktake -`, `stack2take -` takes number from top of a stack and puts it in register, operand must be a register. Stack `1` is `e` and stack `f` is `2`.
+
+## `return`
 
 `return` returns to the section you jumped from and makes program continue to execute from next line after the line with jump command.
 
+## `random`
 
 `random -` puts random positive or negative number (not bigger than biggest number possible) in operand, operand must be a register.
 
+## `nop`
 
 `nop` does no operation just like in assembly.
 
+## `compare`
 
-`compare -, -` compares first operand with second operand, max number of operands is 2. If first operand is bigger than second it puts 1 into 'd', if equel it puts 0, if smaller it puts -1.
+`compare -, -` compares first operand with second operand, max number of operands is 2. If first operand is bigger than second it puts 1 into `d`, if equal it puts `0`, if smaller it puts `-1`.
 
+## `skip`
 
 `skip #-` skips section and makes program execute from next section after skipped section when it comes to that skipped section.
 
+## `halt`
 
 `halt` halts the program until resume, functions can still trigger on input and execute their code
 
+## `output`
 
-`output -, -` first and second operand can be plain number or register, first operand is port number and second is output data from 0 to 65535, look section '4.'.
+`output -, -` first and second operand can be plain number or register, first operand is port number and second is output data from `0` to `65535`, look at [Custom commands](#custom-commands)
 
+## `resume`
 
 `resume` makes program continue to run from line after halt, if the program isn’t halted, resume does nothing. If you halt program the only way to resume will be adding it in some function so you can press some key and unpause it.
 
+## loop
 
-`[ ]` loop start and end, loop stops when 'c' is 0, it subtracts 1 from the number or adds 1 if number is negative until it hits 0. You cant add any command on the same line as loop start "[".
-You cant make loop inside loop. If loop starts with 'c' already 0 it doesnt do anything at all and program continues like loop ended.
+`[ ]` loop start and end, loop stops when `c` is `0`, it subtracts `1` from the number or adds `1` if number is negative until it hits `0`. You can't add any command on the same line as loop start "[".
+You can't make loop inside loop. If loop starts with `c` already 0 it doesnt do anything at all and program continues like loop ended.
 
-A simple script that counts down.
+### A simple script that counts down.
 
 ```
 #start
@@ -142,11 +177,13 @@ print "$COUNTDOWN$"    ~ prints the number in 'c' every run
 #end
 ```
 
+## Comment
+
 `~-` comment, you can only add it after space on end of a line, one normal space or few or a tab space or few of them works.
 
-3. Functions
+# Functions
 
-You add functions after '#end' and one empty line.
+You add functions after `#end` and one empty line.
 
 Function is input triggered code that works even if program is halted.
 
@@ -154,7 +191,7 @@ You define functions with `@function`
 
 Functions execute their code on set input.
 
-Only one function at a time, when function executes its code and in middle of it another function want to execute it has to wait (they queue, if 2 or more functions are triggered exactly at same time (at same nanosecond) it just chooses random one).
+Only one function at a time, when function executes its code and in middle of it another function want to execute, it has to wait (they queue, if `2` or more functions are triggered exactly at same time (at same nanosecond) it just chooses random one).
 
 Example:
 
@@ -182,33 +219,32 @@ Port input functions are exactly the same as functions.
 
 If set port inputs something function triggers its code (optional) and saves the input number in set register.
 
-The code after 'on port input -, -' is optional. You can set the first operand which is port number as register (the number in register) or as plain number. Second operand must be a register.
+The code after `on port input -, -` is optional. You can set the first operand which is port number as register (the number in register) or as plain number. Second operand must be a register.
 
 `on port input -, " "` only executes its code when number in quotes is the number that was recived, it doesnt store it in any register.
 
+A port gives number from `0` to `65535` (max `16` pins). Every pin is one number, so when there is number from more than `1` pin the numbers add up.
 
-A port gives number from 0 to 65535 (max 16 pins). Every pin is one number, so when there is number from more than 1 pin the numbers add up.
+- Pin `0`  = `1`
+- Pin `1`  = `2`
+- Pin `2`  = `4`
+- Pin `3`  = `8`
+- Pin `4`  = `16`
+- Pin `5`  = `32`
+- Pin `6`  = `64`
+- Pin `7`  = `128`
+- Pin `8`  = `256`
+- Pin `9`  = `512`
+- Pin `10` = `1024`
+- Pin `11` = `2048`
+- Pin `12` = `4096`
+- Pin `13` = `8192`
+- Pin `14` = `16384`
+- Pin `15` = `32768`
 
-Pin 0  = 1
-Pin 1  = 2
-Pin 2  = 4
-Pin 3  = 8
-Pin 4  = 16
-Pin 5  = 32
-Pin 6  = 64
-Pin 7  = 128
-Pin 8  = 256
-Pin 9  = 512
-Pin 10 = 1024
-Pin 11 = 2048
-Pin 12 = 4096
-Pin 13 = 8192
-Pin 14 = 16384
-Pin 15 = 32768
+All `16` pins high = `65535`
 
-All 16 pins high = 65535
-
-Examples:
+## Examples
 
 ```
 @function
@@ -231,15 +267,15 @@ Examples:
 ```
 
 
-5. Custom commands
+# Custom commands
 
-You can make custom commands after '#end' like functions, just do one empty line space between like in example above.
+You can make custom commands after `#end` like functions, just do one empty line space between like in example above.
 
 Custom commands are commands that when executed they execute their code.
 
-You define command with `!<name>`, name cant have any numbers or special characters.
+You define command with `!<name>`, name can't have any numbers or special characters.
 
-Example:
+## Example
 
 ```
 #start
@@ -256,7 +292,7 @@ print "click m!"
 ```
 
 
-6. Examples of code
+# Examples
 
 ```
 #start
