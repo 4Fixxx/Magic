@@ -16,16 +16,24 @@ KEYS     PS/2 polled (status 0x64, data 0x60), scancode set 1 (BIOS translated).
          <left> <right> <f1>-<f12> and - = [ ] ; ' ` \\ , . /
          input is polled continuously (after every statement) + at jump/return/loop end/halt/#end.
          keys pressed while a function runs are queued (16 deep, the 17th is dropped).
-PORTS    16 bit ISA style port I/O (ports 0-65535, data 0-65535, 'in ax,dx' / 'out dx,ax').
-         output <port>, <data>     writes <data> to <port>. register operands use their low 16 bits.
-         on port input <port>, <reg>   port function: polled the same way as keys, fires only when
+PORTS    ISA style port I/O, ports 0-65535. every port command names the data size: <8> or <16>
+         <8>  = data 0-255    ('in al,dx' / 'out dx,al'), registers use their low 8 bits.
+         <16> = data 0-65535  ('in ax,dx' / 'out dx,ax'), registers use their low 16 bits.
+         output <x> <port>, <data>     writes <data> to <port>. port and data: number or register.
+         on port input <x> <port>, <reg>   port function: polled the same way as keys, fires only when
                                        the port inputs something: a NEW NON-ZERO value (idle is 0, going
                                        back to 0 never fires). Stores the value in <reg> (even with no
                                        code under it), then runs its code.
-         on port input <port>, "N"     fires its code only when the new value is N (N is 1..65535, 0 is
-                                       "no input" so it is a compile error), stores nothing.
+         on port input <x> <port>, "N"     fires its code only when the new value is N (N is 1..255 for
+                                       <8>, 1..65535 for <16>, 0 is "no input" so it is a compile
+                                       error), stores nothing.
          <port> is a plain number or a register (its low 16 bits, read every poll).
          port events are queued (16 deep) while a function runs, same as keys.
+MEMORY   read <x> <addr>, <reg>    <reg> = byte (<8>) or word (<16>) at <addr>, zero extended.
+         write <x> <addr>, <val>   stores the low 8 / 16 bits of <val> (number or register) at <addr>.
+         <addr> is decimal, hex (0x...) or a register, 0..4294967295, flat addressing (base 0).
+WAIT     wait <ms>   number or register (<= 0 does nothing). uses PIT channel 2 (ports 0x42/0x43/0x61),
+         no interrupts needed, speaker stays off. keys and ports are still polled while waiting.
 SIMULTANEOUS  events found in the same poll count as "exactly at the same time". When 2 or more
          functions are triggered together the order is random: key vs port (random pick between the
          two queue heads when they were found in the same poll, older events always go first),
@@ -38,8 +46,9 @@ RULES    - custom names ($NAME$) are global and resolved at compile time.
          - inside @function / !<cmd>: 'return' leaves that function/command,
            'jump' abandons it (stack unwound) and continues at the section, no return point.
          - loop: body runs, at ']' c moves 1 toward 0, repeats while c != 0.
+         - 'if x is y' runs the code when equal, 'if x not y' when not equal.
          - the else line may be at the same or deeper indent than its if.
-         - tab counts as 4 spaces. numbers: decimal only (hex like 0x8 is an error).
+         - tab counts as 4 spaces. numbers: decimal only (hex like 0x8 is an error), except the address of read/write.
 """
 import sys
 import os
@@ -48,7 +57,7 @@ import argparse
 
 MAXV = 2147483647
 EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI = range(8)
-CC_B, CC_AE, CC_E, CC_NE, CC_S, CC_NS, CC_G = 2, 3, 4, 5, 8, 9, 0xF
+CC_B, CC_AE, CC_E, CC_NE, CC_S, CC_NS, CC_LE, CC_G = 2, 3, 4, 5, 8, 9, 0xE, 0xF
 
 REG4 = {'a': 0, 'b': 4, 'c': 8, 'd': 12}
 HEX_RE = re.compile(r'[+-]?0[xX][0-9a-fA-F]+')
@@ -56,7 +65,7 @@ NUM_RE = re.compile(r'[+-]?[0-9]+')
 MEM0 = 16
 BUILTIN = {'add', 'sub', 'mul', 'div', 'move', 'setname', 'copy', 'jump', 'print', 'if', 'exit',
            'stackadd', 'stack2add', 'stacktake', 'stack2take', 'return', 'random', 'nop',
-           'compare', 'skip', 'halt', 'resume', 'output', 'else'}
+           'compare', 'skip', 'halt', 'resume', 'output', 'read', 'write', 'wait', 'else'}
 
 KEYS = {'esc': 0x01, '-': 0x0C, '=': 0x0D, 'backspace': 0x0E, 'tab': 0x0F, '[': 0x1A, ']': 0x1B,
         'enter': 0x1C, ';': 0x27, "'": 0x28, '`': 0x29, '\\': 0x2B, ',': 0x33, '.': 0x34,
@@ -221,6 +230,7 @@ class Compiler:
         self.cmds = []
         self.funcs = []
         self.pfuncs = []
+        self.uses_wait = False
         self.secs = ['start']
         self.refs = []
         self.skipped = set()
@@ -500,15 +510,15 @@ class Compiler:
         return N('section', ln.no, name=nm)
 
     def parse_if_head(self, s, ln):
-        m = re.fullmatch(r'if\s+(\S+)\s+is\s+(\S+)', s)
+        m = re.fullmatch(r'if\s+(\S+)\s+(is|not)\s+(\S+)', s)
         if not m:
-            self.err(ln.no, "syntax error, expected: if <register> is <value>")
+            self.err(ln.no, "syntax error, expected: if <register> is <value>  or  if <register> not <value>")
             return None
         r = self.need_reg(m.group(1), ln.no, "first operand of 'if'")
-        v = self.operand(m.group(2), ln.no)
+        v = self.operand(m.group(3), ln.no)
         if r is None or v is None:
             return None
-        return N('if', ln.no, reg=r[1], val=v, then=[], els=[])
+        return N('if', ln.no, reg=r[1], neg=(m.group(2) == 'not'), val=v, then=[], els=[])
 
     def parse_if_body(self, node, ln):
         L = self.L
@@ -588,7 +598,7 @@ class Compiler:
             t = h.text
             if t == '@function':
                 if not body:
-                    self.err(h.no, "'@function' needs 'on input <key>' or 'on port input <port>, <register>' under it")
+                    self.err(h.no, "'@function' needs 'on input <key>' or 'on port input <8|16> <port>, <register>' under it")
                     continue
                 oi = body[0]
                 mp = re.fullmatch(r'on\s+port\s+input\s+(.*)', oi.text)
@@ -597,7 +607,7 @@ class Compiler:
                     continue
                 m = re.fullmatch(r'on\s+input\s+<([^<>]+)>', oi.text)
                 if not m:
-                    self.err(oi.no, "expected: on input <key>  or  on port input <port>, <register>")
+                    self.err(oi.no, "expected: on input <key>  or  on port input <8|16> <port>, <register>")
                     continue
                 key = m.group(1).strip().lower()
                 if key not in KEYS:
@@ -622,12 +632,22 @@ class Compiler:
 
     def parse_port_func(self, oi, rest, body):
         no = oi.no
-        m = re.fullmatch(r'(\S+?)\s*,\s*(\S+)', rest.strip())
+        rest = rest.strip()
+        mb = re.match(r'<\s*([^<>]*?)\s*>\s*(.*)', rest)
+        if not mb:
+            self.err(no, 'syntax: on port input <8|16> <port>, <register>   or   on port input <8|16> <port>, "number"  (the bit size <8> or <16> is required)')
+            return
+        if mb.group(1) not in ('8', '16'):
+            self.err(no, "port bit size must be <8> or <16>, got '<%s>'" % mb.group(1))
+            return
+        bits = int(mb.group(1))
+        top = 255 if bits == 8 else 65535
+        m = re.fullmatch(r'(\S+?)\s*,\s*(.+)', mb.group(2).strip())
         if not m:
-            self.err(no, 'syntax: on port input <port>, <register>   or   on port input <port>, "number"')
+            self.err(no, 'syntax: on port input <8|16> <port>, <register>   or   on port input <8|16> <port>, "number"')
             return
         port = self.port_num(m.group(1), no, 'port number')
-        t2 = m.group(2)
+        t2 = m.group(2).strip()
         reg = val = None
         q = re.fullmatch(r'"([^"]*)"', t2)
         if q:
@@ -636,14 +656,14 @@ class Compiler:
                 self.err(no, "hex numbers are not allowed (\"%s\"), use a decimal number" % q.group(1))
                 return
             if not re.fullmatch(r'[0-9]+', inner):
-                self.err(no, "the value in quotes must be a number from 1 to 65535, got '%s'" % q.group(1))
+                self.err(no, "the value in quotes must be a number from 1 to %d, got '%s'" % (top, q.group(1)))
                 return
             val = int(inner, 10)
-            if val > 65535:
-                self.err(no, "port value %d out of range (1..65535)" % val)
+            if val > top:
+                self.err(no, "port value %d out of range for <%d> (1..%d)" % (val, bits, top))
                 return
             if val == 0:
-                self.err(no, "port value 0 means 'no input' and never fires a function, use 1..65535")
+                self.err(no, "port value 0 means 'no input' and never fires a function, use 1..%d" % top)
                 return
         else:
             r = self.need_reg(t2, no, 'second operand')
@@ -652,7 +672,7 @@ class Compiler:
             reg = r[1]
         if port is None:
             return
-        self.pfuncs.append(N('pfunc', no, port=port, reg=reg, val=val,
+        self.pfuncs.append(N('pfunc', no, bits=bits, port=port, reg=reg, val=val,
                              body=self.parse_body(body, oi.indent)))
 
     # ---- commands
@@ -694,6 +714,34 @@ class Compiler:
             i += 1
         flush()
         return N('print', no, parts=parts)
+
+    def bits_arg(self, rest, no, cmd):
+        if rest == '':
+            self.err(no, "'%s' needs operands" % cmd)
+            return None
+        m = re.match(r'<\s*([^<>]*?)\s*>\s*(.*)', rest)
+        if not m:
+            self.err(no, "'%s' needs the bit size <8> or <16>, e.g. %s <8> ..." % (cmd, cmd))
+            return None
+        if m.group(1) not in ('8', '16'):
+            self.err(no, "bit size must be <8> or <16>, got '<%s>'" % m.group(1))
+            return None
+        return int(m.group(1)), m.group(2).strip()
+
+    def addr_op(self, tok, no):
+        if re.fullmatch(r'0[xX][0-9a-fA-F]+', tok):
+            v = int(tok, 16)
+        elif NUM_RE.fullmatch(tok):
+            v = int(tok, 10)
+        elif HEX_RE.fullmatch(tok):
+            self.err(no, "memory address cannot be negative ('%s')" % tok)
+            return None
+        else:
+            return self.regref(tok, no)
+        if v < 0 or v > 0xFFFFFFFF:
+            self.err(no, "memory address %s out of range (0..4294967295)" % tok)
+            return None
+        return ('num', v)
 
     def parse_cmd(self, s, no):
         if s == '[':
@@ -811,20 +859,76 @@ class Compiler:
                 return None
             return N('random', no, reg=r[1])
         if cmd == 'output':
+            r = self.bits_arg(rest, no, cmd)
+            if r is None:
+                return None
+            bits, rest = r
             a = self.args(rest, no, cmd)
             if a is None:
                 return None
             if len(a) != 2:
                 self.err(no, "'output' takes exactly 2 operands (port, data)")
                 return None
+            top = 255 if bits == 8 else 65535
             p = self.port_num(a[0], no, 'port number')
             d = self.operand(a[1], no)
-            if d is not None and d[0] == 'num' and not 0 <= d[1] <= 65535:
-                self.err(no, "output data %s out of range (0..65535)" % a[1])
+            if d is not None and d[0] == 'num' and not 0 <= d[1] <= top:
+                self.err(no, "output data %s out of range for <%d> (0..%d)" % (a[1], bits, top))
                 return None
             if p is None or d is None:
                 return None
-            return N('output', no, port=p, data=d)
+            return N('output', no, bits=bits, port=p, data=d)
+        if cmd == 'read':
+            r = self.bits_arg(rest, no, cmd)
+            if r is None:
+                return None
+            bits, rest = r
+            a = self.args(rest, no, cmd)
+            if a is None:
+                return None
+            if len(a) != 2:
+                self.err(no, "'read' takes exactly 2 operands (address, register)")
+                return None
+            ad = self.addr_op(a[0], no)
+            rg = self.need_reg(a[1], no, 'second operand')
+            if ad is None or rg is None:
+                return None
+            return N('read', no, bits=bits, addr=ad, reg=rg[1])
+        if cmd == 'write':
+            r = self.bits_arg(rest, no, cmd)
+            if r is None:
+                return None
+            bits, rest = r
+            a = self.args(rest, no, cmd)
+            if a is None:
+                return None
+            if len(a) != 2:
+                self.err(no, "'write' takes exactly 2 operands (address, value)")
+                return None
+            top = 255 if bits == 8 else 65535
+            ad = self.addr_op(a[0], no)
+            v = self.operand(a[1], no)
+            if v is not None and v[0] == 'num' and not 0 <= v[1] <= top:
+                self.err(no, "write data %s out of range for <%d> (0..%d)" % (a[1], bits, top))
+                return None
+            if ad is None or v is None:
+                return None
+            return N('write', no, bits=bits, addr=ad, val=v)
+        if cmd == 'wait':
+            a = self.args(rest, no, cmd)
+            if a is None:
+                return None
+            if len(a) != 1:
+                self.err(no, "'wait' takes exactly 1 operand (milliseconds)")
+                return None
+            op = self.operand(a[0], no)
+            if op is None:
+                return None
+            if op[0] == 'num' and op[1] < 0:
+                self.err(no, "wait time cannot be negative ('%s')" % a[0])
+                return None
+            self.uses_wait = True
+            return N('wait', no, op=op)
         if cmd == 'compare':
             a = self.args(rest, no, cmd)
             if a is None:
@@ -1188,7 +1292,7 @@ class Gen:
             a.cmp_rm(EAX, ('bss', n.val[1]))
         else:
             a.cmp_ri(EAX, n.val[1])
-        a.jcc(CC_NE, lelse)
+        a.jcc(CC_E if n.neg else CC_NE, lelse)
         self.gen(n.then, ctx)
         if n.els:
             a.jmp(lend)
@@ -1273,7 +1377,29 @@ class Gen:
         a = self.a
         self.load(EAX, n.data)
         self.load(EDX, n.port)
-        a.raw(0x66, 0xEF)                    # out dx,ax
+        if n.bits == 8:
+            a.raw(0xEE)                      # out dx,al
+        else:
+            a.raw(0x66, 0xEF)                # out dx,ax
+
+    def g_read(self, n, ctx):
+        a = self.a
+        self.load(ESI, n.addr)
+        a.raw(0x0F, 0xB6 if n.bits == 8 else 0xB7, 0x06)   # movzx eax, byte/word [esi]
+        a.mov_mr(('bss', n.reg), EAX)
+
+    def g_write(self, n, ctx):
+        a = self.a
+        self.load(ESI, n.addr)
+        self.load(EAX, n.val)
+        if n.bits == 8:
+            a.raw(0x88, 0x06)                # mov [esi],al
+        else:
+            a.raw(0x66, 0x89, 0x06)          # mov [esi],ax
+
+    def g_wait(self, n, ctx):
+        self.load(EAX, n.op)
+        self.a.call('waitms')
 
     def g_random(self, n, ctx):
         self.a.call('random')
@@ -1287,6 +1413,51 @@ class Gen:
             self.rt_ports()
         self.rt_screen()
         self.rt_misc()
+        if self.c.uses_wait:
+            self.rt_wait()
+
+    def rt_wait(self):
+        a = self.a
+        done, chunk, rem, spin = [a.new() for _ in range(4)]
+        # waitms: eax = milliseconds (<= 0 does nothing). 50 ms chunks + remainder, PIT ch2 one-shot
+        a.label('waitms')
+        a.test_rr(EAX, EAX)
+        a.jcc(CC_LE, done)
+        a.xor_rr(EDX, EDX)
+        a.mov_ri(ECX, 50)
+        a.div(ECX)
+        a.mov_rr(ESI, EAX)                   # esi = chunks of 50 ms
+        a.mov_rr(EDI, EDX)                   # edi = remaining ms
+        a.label(chunk)
+        a.test_rr(ESI, ESI)
+        a.jcc(CC_E, rem)
+        a.mov_ri(EBX, 59659)                 # 50 ms = 59659 ticks of 1193182 Hz
+        a.call('pit_once')
+        a.dec(ESI)
+        a.jmp(chunk)
+        a.label(rem)
+        a.test_rr(EDI, EDI)
+        a.jcc(CC_E, done)
+        a.imul_rri(EAX, EDI, 1193182)
+        a.xor_rr(EDX, EDX)
+        a.mov_ri(ECX, 1000)
+        a.div(ECX)
+        a.mov_rr(EBX, EAX)                   # ticks = ms * 1193182 / 1000
+        a.call('pit_once')
+        a.label(done)
+        a.raw(0xC3)
+        # pit_once: ebx = ticks (1..65535), returns when the one-shot ran out. keys/ports polled meanwhile
+        a.label('pit_once')
+        a.raw(0xE4, 0x61, 0x24, 0xFC, 0xE6, 0x61)    # in al,61 ; and al,FC ; out 61,al  (gate+speaker off)
+        a.raw(0xB0, 0xB0, 0xE6, 0x43)                # mov al,B0 ; out 43,al  (ch2, lo/hi, mode 0)
+        a.raw(0x88, 0xD8, 0xE6, 0x42)                # mov al,bl ; out 42,al
+        a.raw(0x88, 0xF8, 0xE6, 0x42)                # mov al,bh ; out 42,al
+        a.raw(0xE4, 0x61, 0x0C, 0x01, 0xE6, 0x61)    # in al,61 ; or al,1 ; out 61,al  (gate on)
+        a.label(spin)
+        a.call('poll')
+        a.raw(0xE4, 0x61, 0xA8, 0x20)                # in al,61 ; test al,20 (OUT2)
+        a.jcc(CC_E, spin)
+        a.raw(0xC3)
 
     def rt_poll(self):
         a = self.a
@@ -1443,8 +1614,12 @@ class Gen:
                 a.mov_mr(V('pport', 4 * i), EDX)        # port changed: new port starts idle (0)
                 a.mov_mi(V('plast', 4 * i), 0)
                 a.label(same)
-            a.raw(0x66, 0xED)                           # in ax,dx
-            a.movzx16(EAX, EAX)
+            if pf.bits == 8:
+                a.raw(0xEC)                             # in al,dx
+                a.movzx8(EAX, EAX)
+            else:
+                a.raw(0x66, 0xED)                       # in ax,dx
+                a.movzx16(EAX, EAX)
             a.cmp_rm(EAX, V('plast', 4 * i))
             a.jcc(CC_E, nx)
             a.test_rr(EAX, EAX)
