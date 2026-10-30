@@ -108,14 +108,26 @@ exit
 
 `print "you have $NUMBER$ apples!"`
 
-## `if - is - else`
+## `if - is - else`, `if - not - else` 
 
-`if - is - else` checks if number in register set as first operand is second operand, first operand must be a register or custom name. If yes it executes code under it, if no else executes its code. If and else ends when next commands has no space before it.
+`if - is -` checks if the number in the first operand equals the second.
+
+`if - not -` checks if it does not equal the second.
+
+First operand must be a register or custom name. If the condition is true it runs the code under it, otherwise the else code runs. Both blocks end when the next line has no indent.
+
 ```
 if $NUMBER$ is 20
     print "number is now $NUMBER$!"
         else
             add $NUMBER$, 1
+```
+
+```
+if $NUMBER$ not 0
+    print "not zero"
+        else
+            print "zero"
 ```
 
 ## `exit`
@@ -153,18 +165,30 @@ if $NUMBER$ is 20
 
 ## `output`
 
-`output -, -` first and second operand can be plain number or register, first operand is port number and second is output data from `0` to `65535`, look at [Custom commands](#custom-commands)
+`output <x> -, -` first and second operand can be plain number or register, first operand is port number and second is output data from `0` to `65535` in 16-bit and `0` to `255` in 8-bit, in `<x>` you must specify port bit size (`<8>`, `<16>`), look at [Hardware functions](#Hardware functions)
 
 ## `resume`
 
 `resume` makes program continue to run from line after halt, if the program isn’t halted, resume does nothing. If you halt program the only way to resume will be adding it in some function so you can press some key and unpause it.
+
+## `read`
+
+`read <x> -, -` reads the number from memory adress to set register. First operand is memory adress, it can be `decimal` or `hex`, second is register you read into. In `<x>` you must specify bit mode (`<16>`, `<8>`).
+
+## `write`
+
+`write <x> -, -` writes number to memory adress, first operand is memory adress, it can be `decimal` or `hex`, second operand can be a register or plain number. In `<x>` you must specify bit mode (`<16>`, `<8>`).
+
+## `wait`
+
+`wait -` waits set number of `ms`. `wait 1000` waits `1000 ms`.
 
 ## loop
 
 `[ ]` loop start and end, loop stops when `c` is `0`, it subtracts `1` from the number or adds `1` if number is negative until it hits `0`. You can't add any command on the same line as loop start "[".
 You can't make loop inside loop. If loop starts with `c` already 0 it doesnt do anything at all and program continues like loop ended.
 
-### A simple script that counts down.
+A simple script that counts down.
 
 ```
 #start
@@ -213,17 +237,19 @@ exit
 ```
 
 
-4. Hardware functions
+## Hardware functions
 
 Port input functions are exactly the same as functions.
 
 If set port inputs something function triggers its code (optional) and saves the input number in set register.
 
-The code after `on port input -, -` is optional. You can set the first operand which is port number as register (the number in register) or as plain number. Second operand must be a register.
+The code after `on port input <x> -, -` is optional. You can set the first operand which is port number as register (the number in register) or as plain number. Second operand must be a register.
 
-`on port input -, " "` only executes its code when number in quotes is the number that was recived, it doesnt store it in any register.
+In `<x>` you must specify the port bit size. `<8>` is 8-bit and `<16>` is 16-bit.
 
-A port gives number from `0` to `65535` (max `16` pins). Every pin is one number, so when there is number from more than `1` pin the numbers add up.
+`on port input <x> -, " "` only executes its code when number in quotes is the number that was recived, it doesnt store it in any register.
+
+A port gives number from `0` to `65535` in 16-bit and `0` to `255` in 8-bit. Every pin is one number, so when there is number from more than `1` pin the numbers add up.
 
 - Pin `0`  = `1`
 - Pin `1`  = `2`
@@ -232,7 +258,7 @@ A port gives number from `0` to `65535` (max `16` pins). Every pin is one number
 - Pin `4`  = `16`
 - Pin `5`  = `32`
 - Pin `6`  = `64`
-- Pin `7`  = `128`
+- Pin `7`  = `128`  8-bit
 - Pin `8`  = `256`
 - Pin `9`  = `512`
 - Pin `10` = `1024`
@@ -240,26 +266,27 @@ A port gives number from `0` to `65535` (max `16` pins). Every pin is one number
 - Pin `12` = `4096`
 - Pin `13` = `8192`
 - Pin `14` = `16384`
-- Pin `15` = `32768`
+- Pin `15` = `32768`  16-bit
 
-All `16` pins high = `65535`
+All `8`  pins high = `255`   (`8-bit`)
+All `16` pins high = `65535` (`16-bit`)
 
 ## Examples
 
 ```
 @function
-    on port input $PORT$, m1
+    on port input <16> $PORT$, m1
 ```
 
 ```
 @function
-    on port input $PORT$, "8"
+    on port input <16> $PORT$, "8"
         nop
 ```
 
 ```
 @function
-    on port input 889, $INPUT$
+    on port input <16> 889, $INPUT$
         if $INPUT$ is 8
             print "$INPUT$"
                 else
