@@ -16,5 +16,5 @@ python magicc.py yourprogram.mmx
 
 # Magic scripts
 Programs made by me you can use!
-<a href "https://github.com/4Fixxx/Magic-scripts"></a>
+https://github.com/4Fixxx/Magic-scripts
 <img width="540" height="300" alt="46129" src="https://github.com/user-attachments/assets/915bd076-7ac8-468e-ae88-35f162bbf006" />
