@@ -11,6 +11,9 @@ MEMORY   program needs BSS right after the image (size printed after compile),
          zeros to the file instead (for loaders that load exactly file size).
 SCREEN   VGA colour text 80x25 at 0xB8000, hardware cursor via 0x3D4/0x3D5.
          every print ends with a newline, scrolls at the bottom. CP437 text.
+         print colours: <0>..<15> inside the quotes sets the VGA text colour (0 black ... 15 white)
+         for the text after it, until the next <n> or the end of that print. every print starts
+         in the classic VGA color (7, DEFAULT_COLOR), so a print with no <n> looks like normal VGA text.
 KEYS     PS/2 polled (status 0x64, data 0x60), scancode set 1 (BIOS translated).
          <a>-<z> <0>-<9> <space> <enter> <esc> <tab> <backspace> <up> <down>
          <left> <right> <f1>-<f12> and - = [ ] ; ' ` \\ , . /
@@ -62,6 +65,8 @@ CC_B, CC_AE, CC_E, CC_NE, CC_S, CC_NS, CC_LE, CC_G = 2, 3, 4, 5, 8, 9, 0xE, 0xF
 REG4 = {'a': 0, 'b': 4, 'c': 8, 'd': 12}
 HEX_RE = re.compile(r'[+-]?0[xX][0-9a-fA-F]+')
 NUM_RE = re.compile(r'[+-]?[0-9]+')
+COLOR_RE = re.compile(r'<([0-9]+)>')
+DEFAULT_COLOR = 0x07                         # classic VGA text color (light gray on black)
 MEM0 = 16
 BUILTIN = {'add', 'sub', 'mul', 'div', 'move', 'setname', 'copy', 'jump', 'print', 'if', 'exit',
            'stackadd', 'stack2add', 'stacktake', 'stack2take', 'return', 'random', 'nop',
@@ -691,6 +696,17 @@ class Compiler:
         i = 0
         while i < len(text):
             ch = text[i]
+            if ch == '<':
+                cm = COLOR_RE.match(text, i)
+                if cm:
+                    k = int(cm.group(1))
+                    if k > 15:
+                        self.err(no, "text color <%d> out of range (0..15)" % k)
+                        return None
+                    flush()
+                    parts.append(('color', k))
+                    i = cm.end()
+                    continue
             if ch == '$':
                 j = text.find('$', i + 1)
                 if j == i + 1:
@@ -963,7 +979,7 @@ class Gen:
         b.alloc('mem', 4096 * 4)
         b.alloc('st1', 20)
         b.alloc('st2', 20)
-        for nm in ('curs', 'inh', 'halted', 'rng', 'savesp', 'kext', 'kqh', 'kqt', 'rsp', 'rdepth'):
+        for nm in ('curs', 'attr', 'inh', 'halted', 'rng', 'savesp', 'kext', 'kqh', 'kqt', 'rsp', 'rdepth'):
             b.alloc(nm, 4)
         b.alloc('kq', 64)
         b.alloc('rstk', 256)
@@ -1269,8 +1285,11 @@ class Gen:
 
     def g_print(self, n, ctx):
         a = self.a
+        a.mov_mi(self.V('attr'), DEFAULT_COLOR)      # every print starts in the default colour
         for kind, v in n.parts:
-            if kind == 'text':
+            if kind == 'color':
+                a.mov_mi(self.V('attr'), v)
+            elif kind == 'text':
                 lab = self.strs.get(v)
                 if lab is None:
                     lab = 'STR%d' % len(self.strs)
@@ -1726,7 +1745,8 @@ class Gen:
         a.mov_rr(EDI, ECX)
         a.shl(EDI, 1)
         a.add_ri(EDI, 0xB8000)
-        a.raw(0xB4, 0x07)                    # mov ah,7
+        a.raw(0x8A)                          # mov ah,[attr]  (current text colour)
+        a.modrm(4, V('attr'))
         a.raw(0x66, 0xAB)                    # stosw
         a.inc(ECX)
         a.mov_mr(V('curs'), ECX)
