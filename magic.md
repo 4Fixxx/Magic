@@ -30,8 +30,8 @@ You have 6 registers (not counting the memory ones). All registers start at `0`.
 
 `e` and `f` are stack, you can add number to top of a stack using `stackadd -` and take number from top using `stacktake -`, in place of `-` you have to set register from which you take that number. YOU can't DO ANY MATH ON THEM. `e` and `f` can't be operands. Each stack holds up to 4 numbers. If a stack is full, stackadd does nothing and the register keeps its number. If a stack is empty, stacktake puts 0 in the register.
 
-You have `4096` memory registers, they work the same as `a` and `b` registers (hold a number on which you can do math), you use them in the same way as `a` and `b`.
-Registers are from `m1` to `m4096`.
+You have `65536` memory registers, they work the same as `a` and `b` registers (hold a number on which you can do math), you use them in the same way as `a` and `b`.
+Registers are from `m1` to `m65536`.
 
 ## Example
 
@@ -49,6 +49,11 @@ if $NUMBER$ is 20
 exit
 #end
 ```
+
+## Register indirect addressing
+
+`m` is memory register. We can set them in code as `m1`, `m4096`, `m65536` but also as `m(-)`, in place of `-` you have to set a register, `m(a)` the number in `a` is now the registers address.
+In `m(m4)` the `m` register would be `m50` if number in `m4` is  `50`. We can also use custom names in it `m($NUMBER$)`. A register number of 0 or less counts as 1 and anything above 65536 counts as 65536
 
 # Commands
 
@@ -104,8 +109,26 @@ exit
 
 ## `print`
 
-`print " "` prints text in quotes, it also can print $NAME$ as number from register you set this custom name for.
+`print " "` prints text in quotes, it also can print $NAME$ as number from register you set this custom name for. Adding `<x>` inside of quotes changes text color, text has that color until next <> or new print command. 
 
+`<0>`    black
+`<1>`    blue
+`<2>`    green
+`<3>`    cyan
+`<4>`    red
+`<5>`    magenta
+`<6>`    brown
+`<7>`    lightgray
+`<8>`    darkgray
+`<9>`    lightblue
+`<10>`   lightgreen
+`<11>`   lightcyan
+`<12>`   lightred
+`<13>`   lightmagenta
+`<14>`   yellow
+`<15>`   white
+
+`print "<3>Hello <1>World<4>!`
 `print "you have $NUMBER$ apples!"`
 
 ## `if - is - else`, `if - not - else` 
@@ -167,17 +190,21 @@ if $NUMBER$ not 0
 
 `output <x> -, -` first and second operand can be plain number or register, first operand is port number and second is output data from `0` to `65535` in 16-bit and `0` to `255` in 8-bit, in `<x>` you must specify port bit size (`<8>`, `<16>`), look at [Hardware functions](#Hardware functions)
 
+## `input`
+
+`input <x> -, -` reads data from port into register. First and operand can be plain number or register, first operand is port number and second is register, in `<x>` you must specify port bit size (`<8>`, `<16>`), look at [Hardware functions](#Hardware functions)
+
 ## `resume`
 
 `resume` makes program continue to run from line after halt, if the program isn’t halted, resume does nothing. If you halt program the only way to resume will be adding it in some function so you can press some key and unpause it.
 
 ## `read`
 
-`read <x> -, -` reads the number from memory adress to set register. First operand is memory adress, it can be `decimal` or `hex`, second is register you read into. In `<x>` you must specify bit mode (`<16>`, `<8>`).
+`read <x> -, -` reads the number from memory adress to set register. First operand is memory address, it can be `decimal` or `hex`, second is register you read into. In `<x>` you must specify bit mode (`<16>`, `<8>`).
 
 ## `write`
 
-`write <x> -, -` writes number to memory adress, first operand is memory adress, it can be `decimal` or `hex`, second operand can be a register or plain number. In `<x>` you must specify bit mode (`<16>`, `<8>`).
+`write <x> -, -` writes number to memory adress, first operand is memory address, it can be `decimal` or `hex`, second operand can be a register or plain number. In `<x>` you must specify bit mode (`<16>`, `<8>`).
 
 ## `wait`
 
@@ -318,8 +345,7 @@ print "click m!"
     print "meow"
 ```
 
-
-# Examples
+# Examples of code
 
 ```
 #start
