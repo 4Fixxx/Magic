@@ -23,6 +23,7 @@ PORTS    ISA style port I/O, ports 0-65535. every port command names the data si
          <8>  = data 0-255    ('in al,dx' / 'out dx,al'), registers use their low 8 bits.
          <16> = data 0-65535  ('in ax,dx' / 'out dx,ax'), registers use their low 16 bits.
          output <x> <port>, <data>     writes <data> to <port>. port and data: number or register.
+         input <x> <port>, <reg>       reads <port> into <reg> (zero extended). port: number or register.
          on port input <x> <port>, <reg>   port function: polled the same way as keys, fires only when
                                        the port inputs something: a NEW NON-ZERO value (idle is 0, going
                                        back to 0 never fires). Stores the value in <reg> (even with no
@@ -32,6 +33,8 @@ PORTS    ISA style port I/O, ports 0-65535. every port command names the data si
                                        error), stores nothing.
          <port> is a plain number or a register (its low 16 bits, read every poll).
          port events are queued (16 deep) while a function runs, same as keys.
+INDIRECT m(<reg>) = memory register whose number is in <reg> (a, b, c, d, mN, $NAME$ or another m(...)),
+         clamped to 1..65536. usable anywhere a register is, except setname and as a stack operand.
 MEMORY   read <x> <addr>, <reg>    <reg> = byte (<8>) or word (<16>) at <addr>, zero extended.
          write <x> <addr>, <val>   stores the low 8 / 16 bits of <val> (number or register) at <addr>.
          <addr> is decimal, hex (0x...) or a register, 0..4294967295, flat addressing (base 0).
@@ -60,7 +63,8 @@ import argparse
 
 MAXV = 2147483647
 EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI = range(8)
-CC_B, CC_AE, CC_E, CC_NE, CC_S, CC_NS, CC_LE, CC_G = 2, 3, 4, 5, 8, 9, 0xE, 0xF
+CC_B, CC_AE, CC_E, CC_NE, CC_S, CC_NS, CC_GE, CC_LE, CC_G = 2, 3, 4, 5, 8, 9, 0xD, 0xE, 0xF
+NMEM = 65536
 
 REG4 = {'a': 0, 'b': 4, 'c': 8, 'd': 12}
 HEX_RE = re.compile(r'[+-]?0[xX][0-9a-fA-F]+')
@@ -70,7 +74,7 @@ DEFAULT_COLOR = 0x07                         # classic VGA text color (light gra
 MEM0 = 16
 BUILTIN = {'add', 'sub', 'mul', 'div', 'move', 'setname', 'copy', 'jump', 'print', 'if', 'exit',
            'stackadd', 'stack2add', 'stacktake', 'stack2take', 'return', 'random', 'nop',
-           'compare', 'skip', 'halt', 'resume', 'output', 'read', 'write', 'wait', 'else'}
+           'compare', 'skip', 'halt', 'resume', 'output', 'input', 'read', 'write', 'wait', 'else'}
 
 KEYS = {'esc': 0x01, '-': 0x0C, '=': 0x0D, 'backspace': 0x0E, 'tab': 0x0F, '[': 0x1A, ']': 0x1B,
         'enter': 0x1C, ';': 0x27, "'": 0x28, '`': 0x29, '\\': 0x2B, ',': 0x33, '.': 0x34,
@@ -308,14 +312,27 @@ class Compiler:
         m = re.fullmatch(r'm(0|[1-9][0-9]*)', tok)
         if m:
             k = int(m.group(1))
-            if 1 <= k <= 4096:
+            if 1 <= k <= NMEM:
                 return ('reg', MEM0 + (k - 1) * 4)
-            self.err(no, "memory register '%s' out of range (m1..m4096)" % tok)
+            self.err(no, "memory register '%s' out of range (m1..m%d)" % (tok, NMEM))
             return None
+        m = re.fullmatch(r'm\((.+)\)', tok)
+        if m:
+            inner = m.group(1).strip()
+            if NUM_RE.fullmatch(inner):
+                self.err(no, "m( ) needs a register inside, got number '%s'" % inner)
+                return None
+            r = self.regref(inner, no, allow_names)
+            if r is None:
+                return None
+            if r[0] != 'reg':
+                self.err(no, "nested indirect registers are not allowed ('%s')" % tok)
+                return None
+            return ('ind', r)
         m = re.fullmatch(r'\$([A-Z]+)\$', tok)
         if m and allow_names:
             if m.group(1) in self.names:
-                return ('reg', self.names[m.group(1)])
+                return self.names[m.group(1)]
             self.err(no, "unknown custom name '%s' (never set with setname)" % tok)
             return None
         if HEX_RE.fullmatch(tok):
@@ -359,7 +376,7 @@ class Compiler:
         if toks[0].startswith('$'):
             self.err(no, "register already has a custom name (a register can have only 1 custom name)")
             return
-        r = self.regref(toks[0], no, False)
+        r = self.regref(toks[0], no, toks[0].startswith('m('))
         if r is None:
             return
         m = re.fullmatch(r'<([A-Z]+)>', toks[1])
@@ -367,14 +384,14 @@ class Compiler:
             self.err(no, "custom name must be CAPITAL letters only inside < >, got '%s'" % toks[1])
             return
         nm = m.group(1)
-        off = r[1]
+        off = r
         if off in self.regname and self.regname[off] != nm:
             self.err(no, "register already has custom name $%s$ (a register can have only 1 custom name)" % self.regname[off])
             return
         if nm in self.names and self.names[nm] != off:
             self.err(no, "custom name $%s$ is already used for another register" % nm)
             return
-        self.names[nm] = off
+        self.names[nm] = r
         self.regname[off] = nm
 
     # ---- driver
@@ -523,7 +540,7 @@ class Compiler:
         v = self.operand(m.group(3), ln.no)
         if r is None or v is None:
             return None
-        return N('if', ln.no, reg=r[1], neg=(m.group(2) == 'not'), val=v, then=[], els=[])
+        return N('if', ln.no, reg=r, neg=(m.group(2) == 'not'), val=v, then=[], els=[])
 
     def parse_if_body(self, node, ln):
         L = self.L
@@ -674,7 +691,7 @@ class Compiler:
             r = self.need_reg(t2, no, 'second operand')
             if r is None:
                 return
-            reg = r[1]
+            reg = r
         if port is None:
             return
         self.pfuncs.append(N('pfunc', no, bits=bits, port=port, reg=reg, val=val,
@@ -804,7 +821,7 @@ class Compiler:
             ops = [self.operand(t, no) for t in a[1:]]
             if dst is None or any(o is None for o in ops):
                 return None
-            return N(cmd, no, dst=dst[1], ops=ops)
+            return N(cmd, no, dst=dst, ops=ops)
         if cmd == 'div':
             a = self.args(rest, no, cmd)
             if a is None:
@@ -816,7 +833,7 @@ class Compiler:
             op = self.operand(a[1], no)
             if dst is None or op is None:
                 return None
-            return N('div', no, dst=dst[1], op=op)
+            return N('div', no, dst=dst, op=op)
         if cmd == 'move':
             a = self.args(rest, no, cmd)
             if a is None:
@@ -828,7 +845,7 @@ class Compiler:
             y = self.need_reg(a[1], no, 'second operand')
             if x is None or y is None:
                 return None
-            return N('move', no, src=x[1], dst=y[1])
+            return N('move', no, src=x, dst=y)
         if cmd == 'copy':
             a = self.args(rest, no, cmd)
             if a is None:
@@ -840,7 +857,7 @@ class Compiler:
             ds = [self.need_reg(t, no, 'destination') for t in a[1:]]
             if src is None or any(d is None for d in ds):
                 return None
-            return N('copy', no, src=src, dsts=[d[1] for d in ds])
+            return N('copy', no, src=src, dsts=ds)
         if cmd in ('stackadd', 'stack2add'):
             a = self.args(rest, no, cmd)
             if a is None:
@@ -862,7 +879,7 @@ class Compiler:
             r = self.need_reg(a[0], no, 'operand')
             if r is None:
                 return None
-            return N('stake', no, st=2 if cmd == 'stack2take' else 1, reg=r[1])
+            return N('stake', no, st=2 if cmd == 'stack2take' else 1, reg=r)
         if cmd == 'random':
             a = self.args(rest, no, cmd)
             if a is None:
@@ -873,7 +890,7 @@ class Compiler:
             r = self.need_reg(a[0], no, 'operand')
             if r is None:
                 return None
-            return N('random', no, reg=r[1])
+            return N('random', no, reg=r)
         if cmd == 'output':
             r = self.bits_arg(rest, no, cmd)
             if r is None:
@@ -894,6 +911,22 @@ class Compiler:
             if p is None or d is None:
                 return None
             return N('output', no, bits=bits, port=p, data=d)
+        if cmd == 'input':
+            r = self.bits_arg(rest, no, cmd)
+            if r is None:
+                return None
+            bits, rest = r
+            a = self.args(rest, no, cmd)
+            if a is None:
+                return None
+            if len(a) != 2:
+                self.err(no, "'input' takes exactly 2 operands (port, register)")
+                return None
+            p = self.port_num(a[0], no, 'port number')
+            rg = self.need_reg(a[1], no, 'second operand')
+            if p is None or rg is None:
+                return None
+            return N('input', no, bits=bits, port=p, reg=rg)
         if cmd == 'read':
             r = self.bits_arg(rest, no, cmd)
             if r is None:
@@ -909,7 +942,7 @@ class Compiler:
             rg = self.need_reg(a[1], no, 'second operand')
             if ad is None or rg is None:
                 return None
-            return N('read', no, bits=bits, addr=ad, reg=rg[1])
+            return N('read', no, bits=bits, addr=ad, reg=rg)
         if cmd == 'write':
             r = self.bits_arg(rest, no, cmd)
             if r is None:
@@ -976,7 +1009,7 @@ class Gen:
         b = Bss()
         self.bss = b
         b.alloc('regs', 16)
-        b.alloc('mem', 4096 * 4)
+        b.alloc('mem', NMEM * 4)
         b.alloc('st1', 20)
         b.alloc('st2', 20)
         for nm in ('curs', 'attr', 'inh', 'halted', 'rng', 'savesp', 'kext', 'kqh', 'kqt', 'rsp', 'rdepth'):
@@ -1012,11 +1045,28 @@ class Gen:
     def skipoff(self, name):
         return self.bss.o['skip'] + 4 * self.c.secs.index(name)
 
+    def addr(self, ref, sc):
+        # memory operand of a register ref. indirect refs emit code using scratch reg sc
+        if ref[0] == 'reg':
+            return ('bss', ref[1])
+        a = self.a
+        a.mov_rm(sc, self.addr(ref[1], sc))
+        l1, l2 = a.new(), a.new()
+        a.cmp_ri(sc, 1)
+        a.jcc(CC_GE, l1)
+        a.mov_ri(sc, 1)
+        a.label(l1)
+        a.cmp_ri(sc, NMEM)
+        a.jcc(CC_LE, l2)
+        a.mov_ri(sc, NMEM)
+        a.label(l2)
+        return ('bssx', self.bss.o['mem'] - 4, sc, 4)
+
     def load(self, r, op):
-        if op[0] == 'reg':
-            self.a.mov_rm(r, ('bss', op[1]))
-        else:
+        if op[0] == 'num':
             self.a.mov_ri(r, op[1])
+        else:
+            self.a.mov_rm(r, self.addr(op, r))
 
     def build(self):
         self.emit()
@@ -1060,7 +1110,7 @@ class Gen:
         for i, pf in enumerate(self.c.pfuncs):
             a.label('PF_%d' % i)             # eax = value read from the port
             if pf.reg is not None:
-                a.mov_mr(('bss', pf.reg), EAX)
+                a.mov_mr(self.addr(pf.reg, EBX), EAX)
             self.gen(pf.body, 'sub')
             a.raw(0xC3)
         self.runtime()
@@ -1153,10 +1203,11 @@ class Gen:
 
     def arith(self, n, op):
         a = self.a
-        a.mov_rm(EAX, ('bss', n.dst))
+        md = self.addr(n.dst, EBX)
+        a.mov_rm(EAX, md)
         for o in n.ops:
-            if o[0] == 'reg':
-                m = ('bss', o[1])
+            if o[0] != 'num':
+                m = self.addr(o, ESI)
                 if op == 'add':
                     a.add_rm(EAX, m)
                 elif op == 'sub':
@@ -1170,7 +1221,7 @@ class Gen:
                     a.sub_ri(EAX, o[1])
                 else:
                     a.imul_rri(EAX, EAX, o[1])
-        a.mov_mr(('bss', n.dst), EAX)
+        a.mov_mr(md, EAX)
 
     def g_add(self, n, ctx):
         self.arith(n, 'add')
@@ -1186,7 +1237,8 @@ class Gen:
         z = a.new()
         ng = a.new()
         st = a.new()
-        self.load(EAX, ('reg', n.dst))
+        md = self.addr(n.dst, EBX)
+        a.mov_rm(EAX, md)
         self.load(ECX, n.op)
         a.test_rr(ECX, ECX)
         a.jcc(CC_E, z)
@@ -1204,18 +1256,20 @@ class Gen:
         a.xor_rr(EDX, EDX)
         a.label(st)
         a.mov_mr(('bss', 12), EDX)
-        a.mov_mr(('bss', n.dst), EAX)
+        a.mov_mr(md, EAX)
 
     def g_move(self, n, ctx):
         a = self.a
-        a.mov_rm(EAX, ('bss', n.src))
-        a.mov_mi(('bss', n.src), 0)
-        a.mov_mr(('bss', n.dst), EAX)
+        ms = self.addr(n.src, EBX)
+        md = self.addr(n.dst, ESI)
+        a.mov_rm(EAX, ms)
+        a.mov_mi(ms, 0)
+        a.mov_mr(md, EAX)
 
     def g_copy(self, n, ctx):
         self.load(EAX, n.src)
         for d in n.dsts:
-            self.a.mov_mr(('bss', d), EAX)
+            self.a.mov_mr(self.addr(d, EBX), EAX)
 
     def g_jump(self, n, ctx):
         a = self.a
@@ -1298,7 +1352,7 @@ class Gen:
                 a.mov_ri(EBX, len(v))
                 a.call('print_str')
             else:
-                a.mov_rm(EAX, ('bss', v))
+                self.load(EAX, v)
                 a.call('print_dec')
         a.call('newline')
 
@@ -1306,9 +1360,9 @@ class Gen:
         a = self.a
         lelse = a.new()
         lend = a.new()
-        a.mov_rm(EAX, ('bss', n.reg))
-        if n.val[0] == 'reg':
-            a.cmp_rm(EAX, ('bss', n.val[1]))
+        a.mov_rm(EAX, self.addr(n.reg, EBX))
+        if n.val[0] != 'num':
+            a.cmp_rm(EAX, self.addr(n.val, EBX))
         else:
             a.cmp_ri(EAX, n.val[1])
         a.jcc(CC_E if n.neg else CC_NE, lelse)
@@ -1358,8 +1412,8 @@ class Gen:
         a.mov_mr(self.X(st, 4, ECX), EAX)
         a.inc(ECX)
         a.mov_mr(self.V(st), ECX)
-        if n.op[0] == 'reg':
-            a.mov_mi(('bss', n.op[1]), 0)
+        if n.op[0] != 'num':
+            a.mov_mi(self.addr(n.op, EBX), 0)
         a.label(sk)
 
     def g_stake(self, n, ctx):
@@ -1374,14 +1428,14 @@ class Gen:
         a.mov_rm(EAX, self.X(st, 4, ECX))
         a.mov_mr(self.V(st), ECX)
         a.label(store)
-        a.mov_mr(('bss', n.reg), EAX)
+        a.mov_mr(self.addr(n.reg, EBX), EAX)
 
     def g_compare(self, n, ctx):
         a = self.a
         st = a.new()
         self.load(EAX, n.x)
-        if n.y[0] == 'reg':
-            a.cmp_rm(EAX, ('bss', n.y[1]))
+        if n.y[0] != 'num':
+            a.cmp_rm(EAX, self.addr(n.y, EBX))
         else:
             a.cmp_ri(EAX, n.y[1])
         a.mov_ri(EDX, 0)
@@ -1401,11 +1455,22 @@ class Gen:
         else:
             a.raw(0x66, 0xEF)                # out dx,ax
 
+    def g_input(self, n, ctx):
+        a = self.a
+        self.load(EDX, n.port)
+        if n.bits == 8:
+            a.raw(0xEC)                      # in al,dx
+            a.movzx8(EAX, EAX)
+        else:
+            a.raw(0x66, 0xED)                # in ax,dx
+            a.movzx16(EAX, EAX)
+        a.mov_mr(self.addr(n.reg, EBX), EAX)
+
     def g_read(self, n, ctx):
         a = self.a
         self.load(ESI, n.addr)
         a.raw(0x0F, 0xB6 if n.bits == 8 else 0xB7, 0x06)   # movzx eax, byte/word [esi]
-        a.mov_mr(('bss', n.reg), EAX)
+        a.mov_mr(self.addr(n.reg, EBX), EAX)
 
     def g_write(self, n, ctx):
         a = self.a
@@ -1422,7 +1487,7 @@ class Gen:
 
     def g_random(self, n, ctx):
         self.a.call('random')
-        self.a.mov_mr(('bss', n.reg), EAX)
+        self.a.mov_mr(self.addr(n.reg, EBX), EAX)
 
     # ---- runtime routines
     def runtime(self):
@@ -1626,7 +1691,7 @@ class Gen:
                 a.mov_ri(EDX, pf.port[1])
             else:
                 same = a.new()
-                a.mov_rm(EDX, ('bss', pf.port[1]))
+                self.load(EDX, pf.port)
                 a.and_ri(EDX, 0xFFFF)
                 a.cmp_rm(EDX, V('pport', 4 * i))
                 a.jcc(CC_E, same)
